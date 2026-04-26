@@ -149,7 +149,9 @@ def _parse_claude_sse(resp_lines):
             stop_reason = delta.get("stop_reason", stop_reason)
             out_usage = evt.get("usage", {})
             out_tokens = out_usage.get("output_tokens", 0)
-            if out_tokens: print(f"[Output] tokens={out_tokens} stop_reason={stop_reason}")
+            if out_tokens:
+                _record_usage(out_usage, "messages")
+                print(f"[Output] tokens={out_tokens} stop_reason={stop_reason}")
         elif evt_type == "message_stop": got_message_stop = True
         elif evt_type == "error":
             err = evt.get("error", {})
@@ -273,19 +275,44 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
                 blocks.append({"type": "tool_use", "id": bid, "name": tc["name"], "input": inp})
         return blocks
 
+# --- Token usage registry (for accurate per-turn token statistics) ---
+_token_usage_list = []  # Each entry: dict with api_mode, input, output, thinking, cached
+def get_token_usage():
+    """Return and clear accumulated token usage data.
+    Returns: list of dicts {api_mode, input, output, thinking, cached}
+    """
+    global _token_usage_list
+    ret = list(_token_usage_list)
+    _token_usage_list = []
+    return ret
+def clear_token_usage():
+    global _token_usage_list; _token_usage_list = []
+# --- End token usage registry ---
+
 def _record_usage(usage, api_mode):
     if not usage: return
+    entry = {"api_mode": api_mode, "input": 0, "output": 0, "thinking": 0, "cached": 0}
     if api_mode == 'responses':
         cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
         inp = usage.get("input_tokens", 0)
-        print(f"[Cache] input={inp} cached={cached}")
+        out = usage.get("output_tokens", 0)
+        think = (usage.get("output_tokens_details") or {}).get("thinking_tokens", 0)
+        entry.update({"input": inp, "output": out, "thinking": think, "cached": cached})
+        print(f"[Cache] input={inp} output={out} thinking={think} cached={cached}")
     elif api_mode == 'chat_completions':
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
         inp = usage.get("prompt_tokens", 0)
-        print(f"[Cache] input={inp} cached={cached}")
+        out = usage.get("completion_tokens", 0)
+        think = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+        entry.update({"input": inp, "output": out, "thinking": think, "cached": cached})
+        print(f"[Cache] input={inp} output={out} thinking={think} cached={cached}")
     elif api_mode == 'messages':
         ci, cr, inp = usage.get("cache_creation_input_tokens", 0), usage.get("cache_read_input_tokens", 0), usage.get("input_tokens", 0)
-        print(f"[Cache] input={inp} creation={ci} read={cr}")
+        out = usage.get("output_tokens", 0)
+        think = (usage.get("output_tokens_details") or {}).get("thinking_tokens", 0)
+        entry.update({"input": inp, "output": out, "thinking": think, "cached": ci + cr})
+        print(f"[Cache] input={inp} output={out} thinking={think} creation={ci} read={cr}")
+    _token_usage_list.append(entry)
     
 def _parse_openai_json(data, api_mode="chat_completions"):
     blocks = []
@@ -343,7 +370,6 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
         payload = {"model": model, "input": _to_responses_input(messages), "stream": stream, 
                    "prompt_cache_key": _RESP_CACHE_KEY, "instructions": system or "You are an Omnipotent Executor."}
         if reasoning_effort: payload["reasoning"] = {"effort": reasoning_effort}
-        if max_tokens: payload["max_output_tokens"] = max_tokens
     else:
         url = auto_make_url(api_base, "chat/completions")
         if system: messages = [{"role": "system", "content": system}] + messages
@@ -351,7 +377,7 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
         payload = {"model": model, "messages": messages, "stream": stream}
         if stream: payload["stream_options"] = {"include_usage": True}
         if temperature != 1: payload["temperature"] = temperature
-        if max_tokens: payload["max_completion_tokens" if ml.startswith(("gpt-5", "o1", "o2", "o3", "o4")) else "max_tokens"] = max_tokens
+        if max_tokens: payload["max_tokens"] = max_tokens
         if reasoning_effort: payload["reasoning_effort"] = reasoning_effort
     if tools: payload["tools"] = _prepare_oai_tools(tools, api_mode)
     RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
@@ -509,7 +535,7 @@ class BaseSession:
         mode = str(cfg.get('api_mode', 'chat_completions')).strip().lower().replace('-', '_')
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
-        self.max_tokens = cfg.get('max_tokens')
+        self.max_tokens = cfg.get('max_tokens', 8192)
     def _apply_claude_thinking(self, payload):
         if self.thinking_type:
             thinking = {"type": self.thinking_type}
@@ -542,6 +568,7 @@ class BaseSession:
         return _ask_gen() if stream else ''.join(list(_ask_gen()))
 
 def _keep_claude_block(b): return not isinstance(b, dict) or b.get("type") != "thinking" or b.get("signature")
+
 def _drop_unsigned_thinking(messages):
     for m in messages:
         c = m.get("content")
@@ -550,7 +577,6 @@ def _drop_unsigned_thinking(messages):
 
 class ClaudeSession(BaseSession):
     def raw_ask(self, messages):
-        if self.max_tokens is None: self.max_tokens = 8192
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01", "anthropic-beta": "prompt-caching-2024-07-31"}
         payload = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens, "stream": True}
         if self.temperature != 1: payload["temperature"] = self.temperature
@@ -606,8 +632,8 @@ class NativeClaudeSession(BaseSession):
         self._device_id = uuid.uuid4().hex + uuid.uuid4().hex[:32]
         self.tools = None
     def raw_ask(self, messages):
-        messages = _drop_unsigned_thinking(_fix_messages(messages))
-        if self.max_tokens is None: self.max_tokens = 8192
+        messages = _fix_messages(messages)
+        messages = _drop_unsigned_thinking(messages)
         model = self.model
         beta_parts = ["claude-code-20250219", "interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12", "prompt-caching-scope-2026-01-05"]
         if "[1m]" in model.lower():
@@ -944,7 +970,7 @@ class MixinSession:
 
 THINKING_PROMPT_ZH = """
 ### 行动规范（持续有效）
-每次回复（含工具调用轮）都先在回复文字中包含一个<summary></summary> 中输出极简单行（<30字）物理快照：上次结果新信息+本次意图。此内容进入长期工作记忆。
+每次回复请先在回复文字中包含一个<summary></summary> 中输出极简单行（<30字）物理快照：上次结果新信息+本次意图。此内容进入长期工作记忆。
 \n**若用户需求未完成，必须进行工具调用！**
 """.strip()
 THINKING_PROMPT_EN = """
