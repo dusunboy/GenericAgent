@@ -1,26 +1,33 @@
-import os, json, re, time, requests, sys, threading, urllib3, base64, mimetypes, uuid
+import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid
 from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 
 def _load_mykeys():
+    global _mykey_path
     try:
-        import mykey; return {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
+        import mykey; importlib.reload(mykey); _mykey_path = mykey.__file__
+        return {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
     except ImportError: pass
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mykey.json')
+    _mykey_path = p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mykey.json')
     if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from mykey_template.')
     with open(p, encoding='utf-8') as f: return json.load(f)
 
+_mykey_path = _mykey_mtime = None
+def reload_mykeys():
+    global _mykey_mtime
+    mt = os.stat(_mykey_path).st_mtime_ns if _mykey_path else -1
+    if mt == _mykey_mtime: return globals().get('mykeys', {}), False
+    mk = _load_mykeys(); _mykey_mtime = os.stat(_mykey_path).st_mtime_ns
+    print(f'[Info] Load mykeys from {_mykey_path}')
+    globals().update(mykeys=mk)
+    if mk.get('langfuse_config'):
+        try: from plugins import langfuse_tracing
+        except Exception: pass
+    return mk, True
+
 def __getattr__(name):  # once guard in PEP 562
-    if name in ('mykeys', 'proxies'):  
-        mk = _load_mykeys()
-        proxy = mk.get("proxy", 'http://127.0.0.1:2082')
-        px = {"http": proxy, "https": proxy} if proxy else None
-        globals().update(mykeys=mk, proxies=px)
-        if mk.get('langfuse_config'):
-            try: from plugins import langfuse_tracing
-            except Exception: pass
-        return globals()[name]
+    if name == 'mykeys': return reload_mykeys()[0]
     raise AttributeError(f"module 'llmcore' has no attribute {name}")
 
 def compress_history_tags(messages, keep_recent=10, max_len=800, force=False):
@@ -160,6 +167,11 @@ def _parse_claude_sse(resp_lines):
     if not warn:
         if not got_message_stop and not stop_reason: warn = "\n\n[!!! 流异常中断，未收到完整响应 !!!]"
         elif stop_reason == "max_tokens": warn = "\n\n[!!! Response truncated: max_tokens !!!]"
+    if current_block:
+        if current_block["type"] == "tool_use":
+            try: current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
+            except: current_block["input"] = {"_raw": tool_json_buf}
+        content_blocks.append(current_block); current_block = None
     if warn:
         print(f"[WARN] {warn.strip()}")
         content_blocks.append({"type": "text", "text": warn}); yield warn
@@ -357,29 +369,32 @@ def _stamp_oai_cache_markers(messages, model):
             c = list(c); c[-1] = dict(c[-1], cache_control={'type': 'ephemeral'})
             messages[idx] = {**messages[idx], 'content': c}
 
-def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completions', *,
-                   system=None, temperature=0.5, max_tokens=None, tools=None, reasoning_effort=None,
-                   max_retries=0, connect_timeout=10, read_timeout=300, proxies=None, stream=True):
+def _openai_stream(sess, messages):
     """Shared OpenAI-compatible streaming request with retry. Yields text chunks, returns list[content_block]."""
+    model, api_mode, max_retries = sess.model, sess.api_mode, sess.max_retries
     ml = model.lower()
+    temperature = sess.temperature
     if 'kimi' in ml or 'moonshot' in ml: temperature = 1
     elif 'minimax' in ml: temperature = max(0.01, min(temperature, 1.0))  # MiniMax requires temp in (0, 1]
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "text/event-stream"}
+    headers = {"Authorization": f"Bearer {sess.api_key}", "Content-Type": "application/json", "Accept": "text/event-stream"}
     if api_mode == "responses":
-        url = auto_make_url(api_base, "responses")
-        payload = {"model": model, "input": _to_responses_input(messages), "stream": stream, 
-                   "prompt_cache_key": _RESP_CACHE_KEY, "instructions": system or "You are an Omnipotent Executor."}
-        if reasoning_effort: payload["reasoning"] = {"effort": reasoning_effort}
+        url = auto_make_url(sess.api_base, "responses")
+        payload = {"model": model, "input": _to_responses_input(messages), "stream": sess.stream, 
+                   "prompt_cache_key": _RESP_CACHE_KEY, "instructions": sess.system or "You are an Omnipotent Executor."}
+        if sess.reasoning_effort: payload["reasoning"] = {"effort": sess.reasoning_effort}
+        if sess.max_tokens: payload["max_output_tokens"] = sess.max_tokens
     else:
-        url = auto_make_url(api_base, "chat/completions")
-        if system: messages = [{"role": "system", "content": system}] + messages
+        url = auto_make_url(sess.api_base, "chat/completions")
+        if sess.system: messages = [{"role": "system", "content": sess.system}] + messages
         _stamp_oai_cache_markers(messages, model)
-        payload = {"model": model, "messages": messages, "stream": stream}
-        if stream: payload["stream_options"] = {"include_usage": True}
+        payload = {"model": model, "messages": messages, "stream": sess.stream}
+        if sess.stream: payload["stream_options"] = {"include_usage": True}
         if temperature != 1: payload["temperature"] = temperature
-        if max_tokens: payload["max_tokens"] = max_tokens
-        if reasoning_effort: payload["reasoning_effort"] = reasoning_effort
+        if sess.max_tokens: payload["max_completion_tokens" if ml.startswith(("gpt-5", "o1", "o2", "o3", "o4")) else "max_tokens"] = sess.max_tokens
+        if sess.reasoning_effort: payload["reasoning_effort"] = sess.reasoning_effort
+    tools = getattr(sess, 'tools', None)
     if tools: payload["tools"] = _prepare_oai_tools(tools, api_mode)
+    if sess.service_tier: payload["service_tier"] = sess.service_tier
     RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
     def _delay(resp, attempt):
         try: ra = float((resp.headers or {}).get("retry-after"))
@@ -388,8 +403,8 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
     for attempt in range(max_retries + 1):
         streamed = False
         try:
-            with requests.post(url, headers=headers, json=payload, stream=stream,
-                               timeout=(connect_timeout, read_timeout), proxies=proxies) as r:
+            with requests.post(url, headers=headers, json=payload, stream=sess.stream,
+                               timeout=(sess.connect_timeout, sess.read_timeout), proxies=sess.proxies, verify=sess.verify) as r:
                 if r.status_code >= 400:
                     if r.status_code in RETRYABLE and attempt < max_retries:
                         d = _delay(r, attempt)
@@ -400,7 +415,7 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
                     except: pass
                     err = f"!!!Error: HTTP {r.status_code}" + (f": {body}" if body else "")
                     yield err; return [{"type": "text", "text": err}]
-                gen = _parse_openai_sse(r.iter_lines(), api_mode) if stream else _parse_openai_json(r.json(), api_mode)
+                gen = _parse_openai_sse(r.iter_lines(), api_mode) if sess.stream else _parse_openai_json(r.json(), api_mode)
                 try:
                     while True: streamed = True; yield next(gen)
                 except StopIteration as e:
@@ -514,13 +529,14 @@ class BaseSession:
         self.api_key = cfg['apikey']
         self.api_base = cfg['apibase'].rstrip('/')
         self.model = cfg.get('model', '')
-        self.context_win = cfg.get('context_win', 24000)
+        self.context_win = cfg.get('context_win', 28000)
         self.history = []
         self.lock = threading.Lock()
         self.system = ""
         self.name = cfg.get('name', self.model)
         proxy = cfg.get('proxy')
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
+        self.verify = cfg.get('verify', True)
         self.max_retries = max(0, int(cfg.get('max_retries', 1)))
         self.stream = cfg.get('stream', True)
         default_ct, default_rt = (5, 30) if self.stream else (10, 240)
@@ -530,6 +546,7 @@ class BaseSession:
             v = cfg.get(key); v = None if v is None else str(v).strip().lower()
             return v if not v or v in valid else print(f"[WARN] Invalid {key} {v!r}, ignored.")
         self.reasoning_effort = _enum('reasoning_effort', {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'})
+        self.service_tier = _enum('service_tier', {'auto', 'default', 'priority', 'flex'})
         self.thinking_type = _enum('thinking_type', {'adaptive', 'enabled', 'disabled'})
         self.thinking_budget_tokens = cfg.get('thinking_budget_tokens')
         mode = str(cfg.get('api_mode', 'chat_completions')).strip().lower().replace('-', '_')
@@ -575,6 +592,17 @@ def _drop_unsigned_thinking(messages):
         if isinstance(c, list): m["content"] = [b for b in c if _keep_claude_block(b)]
     return messages
 
+def _ensure_thinking_blocks(messages, model):
+    """deepseek needs thinking in history!"""
+    if 'deepseek' not in model.lower(): return messages
+    for m in messages:
+        if m.get("role") != "assistant": continue
+        c = m.get("content")
+        if not isinstance(c, list): continue
+        has_thinking = any(isinstance(b, dict) and b.get("type") == "thinking" for b in c)
+        if not has_thinking: m["content"] = [{"type": "thinking", "thinking": "...", "signature": "placeholder"}, *c]
+    return messages
+
 class ClaudeSession(BaseSession):
     def raw_ask(self, messages):
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01", "anthropic-beta": "prompt-caching-2024-07-31"}
@@ -583,7 +611,7 @@ class ClaudeSession(BaseSession):
         self._apply_claude_thinking(payload)
         if self.system: payload["system"] = [{"type": "text", "text": self.system, "cache_control": {"type": "persistent"}}]
         try:
-            with requests.post(auto_make_url(self.api_base, "messages"), headers=headers, json=payload, stream=True, timeout=(self.connect_timeout, self.read_timeout)) as r:
+            with requests.post(auto_make_url(self.api_base, "messages"), headers=headers, json=payload, stream=True, timeout=(self.connect_timeout, self.read_timeout), verify=self.verify) as r:
                 if r.status_code != 200: raise Exception(f"HTTP {r.status_code} {r.content.decode('utf-8', errors='replace')[:500]}")
                 return (yield from _parse_claude_sse(r.iter_lines())) or []
         except Exception as e:
@@ -597,11 +625,7 @@ class ClaudeSession(BaseSession):
         return msgs
 
 class LLMSession(BaseSession):
-    def raw_ask(self, messages):
-        return (yield from _openai_stream(self.api_base, self.api_key, messages, self.model, self.api_mode,
-                                  temperature=self.temperature, reasoning_effort=self.reasoning_effort,
-                                  max_tokens=self.max_tokens, max_retries=self.max_retries, stream=self.stream,
-                                  connect_timeout=self.connect_timeout, read_timeout=self.read_timeout, proxies=self.proxies))
+    def raw_ask(self, messages): return (yield from _openai_stream(self, messages))
     def make_messages(self, raw_list): return _msgs_claude2oai(raw_list)
 
 def _fix_messages(messages):
@@ -624,7 +648,6 @@ def _fix_messages(messages):
 class NativeClaudeSession(BaseSession):
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.context_win = cfg.get("context_win", 28000)
         self.fake_cc_system_prompt = cfg.get("fake_cc_system_prompt", False)
         self.user_agent = cfg.get("user_agent", "claude-cli/2.1.113 (external, cli)")
         self._session_id = str(uuid.uuid4())
@@ -632,8 +655,8 @@ class NativeClaudeSession(BaseSession):
         self._device_id = uuid.uuid4().hex + uuid.uuid4().hex[:32]
         self.tools = None
     def raw_ask(self, messages):
-        messages = _fix_messages(messages)
-        messages = _drop_unsigned_thinking(messages)
+        messages = _ensure_thinking_blocks(_drop_unsigned_thinking(_fix_messages(messages)), self.model)
+        if self.max_tokens is None: self.max_tokens = 8192
         model = self.model
         beta_parts = ["claude-code-20250219", "interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12", "prompt-caching-scope-2026-01-05"]
         if "[1m]" in model.lower():
@@ -661,7 +684,7 @@ class NativeClaudeSession(BaseSession):
             messages[idx] = {**messages[idx], "content": list(messages[idx]["content"])}
             messages[idx]["content"][-1] = dict(messages[idx]["content"][-1], cache_control={"type": "ephemeral"})
         try:
-            with requests.post(auto_make_url(self.api_base, "messages")+'?beta=true', headers=headers, json=payload, stream=self.stream, timeout=(self.connect_timeout, self.read_timeout)) as resp:
+            with requests.post(auto_make_url(self.api_base, "messages")+'?beta=true', headers=headers, json=payload, stream=self.stream, timeout=(self.connect_timeout, self.read_timeout), verify=self.verify) as resp:
                 if resp.status_code != 200: raise Exception(f"HTTP {resp.status_code} {resp.content.decode('utf-8', errors='replace')[:500]}")
                 if self.stream: return (yield from _parse_claude_sse(resp.iter_lines())) or []
                 else:
@@ -705,11 +728,8 @@ class NativeClaudeSession(BaseSession):
 class NativeOAISession(NativeClaudeSession):
     def raw_ask(self, messages):
         messages = _fix_messages(messages)
-        return (yield from _openai_stream(self.api_base, self.api_key, _msgs_claude2oai(messages), self.model, self.api_mode,
-                                          system=self.system, temperature=self.temperature, max_tokens=self.max_tokens,
-                                          tools=self.tools, reasoning_effort=self.reasoning_effort,
-                                          max_retries=self.max_retries, connect_timeout=self.connect_timeout,
-                                          read_timeout=self.read_timeout, proxies=self.proxies, stream=self.stream))
+        messages = _ensure_thinking_blocks(messages, self.model)
+        return (yield from _openai_stream(self, _msgs_claude2oai(messages)))
 
 def openai_tools_to_claude(tools):
     """[{type:'function', function:{name,description,parameters}}] → [{name,description,input_schema}]."""

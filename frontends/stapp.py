@@ -32,17 +32,21 @@ agent = init()
 
 st.title("🖥️ Cowork")
 
-if 'autonomous_enabled' not in st.session_state: st.session_state.autonomous_enabled = False
+st.session_state.setdefault('autonomous_enabled', False)
 
 @st.fragment
 def render_sidebar():
+    st.session_state.setdefault('autonomous_enabled', False)
+    llm_options = agent.list_llms()
     current_idx = agent.llm_no
-    st.caption(f"LLM Core: {current_idx}: {agent.get_llm_name()}", help="点击切换备用链路")
+    llm_labels = {idx: f"{idx}: {(name or '').strip()}" for idx, name, _ in llm_options}
+    st.caption(f"LLM Core: {llm_labels.get(current_idx, str(current_idx))}", help="下拉切换备用链路")
+    selected_idx = st.selectbox("备用链路", [idx for idx, _, _ in llm_options], index=next((i for i, (idx, _, _) in enumerate(llm_options) if idx == current_idx), 0), format_func=llm_labels.get, label_visibility="collapsed", key="sidebar_llm_select")
+    if selected_idx != current_idx:
+        agent.next_llm(selected_idx); st.rerun(scope="fragment")
     last_reply_time = st.session_state.get('last_reply_time', 0)
     if last_reply_time > 0:
         st.caption(f"空闲时间：{int(time.time()) - last_reply_time}秒", help="当超过30分钟未收到回复时，系统会自动任务")
-    if st.button("切换备用链路"):
-        agent.next_llm(); st.rerun(scope="fragment")
     if st.button("强行停止任务"):
         agent.abort(); st.toast("已发送停止信号"); st.rerun()
     if st.button("重新注入工具"):
