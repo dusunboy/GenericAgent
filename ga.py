@@ -75,6 +75,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         status_icon = "✅" if exit_code == 0 else "❌"
         if exit_code is None: status_icon = "⏳" 
         output_snippet = smart_format(stdout_str, max_str_len=600, omit_str='\n\n[omitted long output]\n\n')
+        output_snippet = re.sub(r'`{4,}', lambda m: m.group(0)[:3] + '\u200b' + m.group(0)[3:], output_snippet)
         yield f"[Status] {status_icon} Exit Code: {exit_code}\n[Stdout]\n{output_snippet}\n"
         if process.stdout: threading.Thread(target=process.stdout.close, daemon=True).start()
         return {
@@ -373,10 +374,10 @@ class GenericAgentHandler(BaseHandler):
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
 
         def extract_robust_content(text):
-            tag = re.search(r"<file_content[^>]*>(.*)</file_content>", text, re.DOTALL)
-            if tag: return tag.group(1).strip()
-            s, e = text.find("```"), text.rfind("```")
-            if -1 < s < e: return text[text.find("\n", s)+1 : e].strip()
+            tags = re.findall(r"<file_content[^>]*>(.*?)</file_content>", text, re.DOTALL)
+            if tags: return tags[-1].strip()
+            blocks = re.findall(r"```[^\n]*\n([\s\S]*?)```", text)
+            if blocks: return blocks[-1].strip()
             return None
         
         blocks = extract_robust_content(response.content)
@@ -445,9 +446,11 @@ class GenericAgentHandler(BaseHandler):
         content = getattr(response, 'content', '') or ""
         thinking = getattr(response, 'thinking', '') or ""
         if not response or (not content.strip() and not thinking.strip()):
+            self._empty_ct = getattr(self, '_empty_ct', 0) + 1
+            if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
             yield "[Warn] LLM returned an empty response. Retrying...\n"
             return StepOutcome({}, next_prompt="[System] Blank response, regenerate and tooluse")
-        if len(content) > 50 and ('未收到完整响应 !!!]' in content[-100:] or '!!!Error: [SSL:' in content[-100:]):
+        if len(content) > 50 and ('[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]):
             return StepOutcome({}, next_prompt="[System] Incomplete response. Regenerate and tooluse.")
         if 'max_tokens !!!]' in content[-100:]:
             return StepOutcome({}, next_prompt="[System] max_tokens limit reached. Use multi small steps to do it.")

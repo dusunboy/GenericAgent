@@ -99,6 +99,8 @@ def fold_turns(text):
     # 先把4+反引号块替换为占位符，避免误切子agent嵌套的 LLM Running
     _ph = []
     safe = re.sub(r'`{4,}.*?`{4,}', lambda m: (_ph.append(m.group(0)), f'\x00PH{len(_ph)-1}\x00')[1], text, flags=re.DOTALL)
+    # 流式中间态：末尾可能有未闭合的4+反引号块，也需保护
+    safe = re.sub(r'`{4,}[^`].*$', lambda m: (_ph.append(m.group(0)), f'\x00PH{len(_ph)-1}\x00')[1], safe, flags=re.DOTALL)
     parts = re.split(r'(\**LLM Running \(Turn \d+\) \.\.\.\*\**)', safe)
     parts = [re.sub(r'\x00PH(\d+)\x00', lambda m: _ph[int(m.group(1))], p) for p in parts]
     if len(parts) < 4: return [{'type': 'text', 'content': text}]
@@ -162,13 +164,17 @@ try:
     _embed_html = lambda html, **kw: _st_iframe(html, **{k: max(v, 1) if isinstance(v, int) else v for k, v in kw.items()})
 except (ImportError, AttributeError):
     from streamlit.components.v1 import html as _embed_html  # ≤1.55
-_js_scroll_fix = ("!function(){var p=window.parent;if(p.__sfx)return;p.__sfx=1;"
-    "var d=p.document;setInterval(function(){"
-    "var m=d.querySelector('section.main');if(!m)return;"
-    "var b=m.querySelector('.block-container');if(!b)return;"
-    "if(m.scrollHeight>b.scrollHeight+150){"
-    "m.style.overflow='hidden';void m.offsetHeight;m.style.overflow=''}"
-    "},3000)}()")
+_js_scroll_fix = (
+    "!function(){var p=window.parent;if(p.__sfx2)return;p.__sfx2=1;var d=p.document;"
+    "function f(){var m=d.querySelector('section.main');if(!m)return;"
+    "var s=m.scrollTop;m.style.minHeight=m.scrollHeight+1+'px';void m.offsetHeight;"
+    "m.style.minHeight='';void m.offsetHeight;m.scrollTop=s}"
+    "d.addEventListener('transitionend',function(e){"
+    "e.target.closest&&e.target.closest('details')&&setTimeout(f,60)},!0);"
+    "new MutationObserver(function(){setTimeout(f,80)})"
+    ".observe(d.body,{subtree:1,attributes:1,attributeFilter:['open']});"
+    "setInterval(f,5000)}()"
+)
 # IME composition fix (macOS only) - prevents Enter from submitting during CJK input
 _js_ime_fix = ("" if os.name == 'nt' else
     "!function(){if(window.parent.__imeFix)return;window.parent.__imeFix=1;"
