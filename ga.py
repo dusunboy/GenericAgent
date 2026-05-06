@@ -508,10 +508,26 @@ class GenericAgentHandler(BaseHandler):
         else: result = "Memory Management SOP not found. Do not update memory."
         return StepOutcome(result, next_prompt=prompt)
 
+    def _fold_earlier(self, lines):
+        FALLBACK = '直接回答了用户问题'
+        parts, cnt, last = [], 0, ''
+        def flush():
+            if cnt:
+                if FALLBACK in last: parts.append(f'[Agent]（{cnt} turns）')
+                else: parts.append(f'{last}（{cnt} turns）')
+        for line in lines:
+            if line.startswith('[USER]'):
+                flush(); parts.append(line); cnt = 0; last = ''
+            else: cnt += 1; last = line
+        flush()
+        return "\n".join(parts[-150:])
+
     def _get_anchor_prompt(self, skip=False):
         if skip: return "\n"
-        h_str = "\n".join(self.history_info[-40:])
-        prompt = f"\n### [WORKING MEMORY]\n<history>\n{h_str}\n</history>"
+        h = self.history_info; W = 30
+        earlier = f'<earlier_context>\n{self._fold_earlier(h[:-W])}\n</earlier_context>\n' if len(h) > W else ""
+        h_str = "\n".join(h[-W:])
+        prompt = f"\n### [WORKING MEMORY]\n{earlier}<history>\n{h_str}\n</history>"
         prompt += f"\nCurrent turn: {self.current_turn}\n"
         if self.working.get('key_info'): prompt += f"\n<key_info>{self.working.get('key_info')}</key_info>"
         if self.working.get('related_sop'): prompt += f"\n有不清晰的地方请再次读取{self.working.get('related_sop')}"
@@ -519,7 +535,7 @@ class GenericAgentHandler(BaseHandler):
             try: print(prompt)
             except: pass
         return prompt
-
+    
     def turn_end_callback(self, response, tool_calls, tool_results, turn, next_prompt, exit_reason):
         _c = re.sub(r'```.*?```|<thinking>.*?</thinking>', '', response.content, flags=re.DOTALL)
         rsumm = re.search(r"<summary>(.*?)</summary>", _c, re.DOTALL)
@@ -529,17 +545,18 @@ class GenericAgentHandler(BaseHandler):
             clean_args = {k: v for k, v in args.items() if not k.startswith('_')}
             summary = f"调用工具{tool_name}, args: {clean_args}"
             if tool_name == 'no_tool': summary = "直接回答了用户问题"
-            next_prompt += "\n[DANGER] 你遗漏了<summary>，必须按协议一直在每次回复中用<summary>中输出极简单行摘要！" 
-        summary = smart_format(summary, max_str_len=100)
+            next_prompt += "\n\n\nUSER: <summary>呢？？？！\n\n"
+        summary = smart_format(summary.replace('\n', ''), max_str_len=80)
         self.history_info.append(f'[Agent] {summary}')
-        if turn % 65 == 0 and 'plan' not in str(self.working.get('related_sop')):
-            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。你必须总结情况进行ask_user，不允许继续重试。"
+        _plan = self._in_plan_mode()
+        if turn % 65 == 0 and (not _plan):
+            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。必须总结情况进行ask_user，不允许继续重试。"
         elif turn % 7 == 0:
             next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
         elif turn % 10 == 0: next_prompt += get_global_memory()
 
-        if (_plan := self._in_plan_mode()) and turn >= 10 and turn % 5 == 0:
-            next_prompt = f"[Plan Hint] 你正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\n\n" + next_prompt
+        if _plan and turn >= 10 and turn % 5 == 0:
+            next_prompt = f"[Plan Hint] 正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\n\n" + next_prompt
         if _plan and turn >= 90: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。"
 
         injkeyinfo = consume_file(self.parent.task_dir, '_keyinfo')

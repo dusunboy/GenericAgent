@@ -37,7 +37,7 @@ def compress_history_tags(messages, keep_recent=10, max_len=800, force=False):
     if compress_history_tags._cd % 5 != 0: return messages
     _before = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
     _pats = {tag: re.compile(rf'(<{tag}>)([\s\S]*?)(</{tag}>)') for tag in ('thinking', 'think', 'tool_use', 'tool_result')}
-    _hist_pat = re.compile(r'<(history|key_info)>[\s\S]*?</\1>')
+    _hist_pat = re.compile(r'<(history|key_info|earlier_context)>[\s\S]*?</\1>')
     def _trunc_str(s): return s[:max_len//2] + '\n...[Truncated]...\n' + s[-max_len//2:] if isinstance(s, str) and len(s) > max_len else s
     def _trunc(text):
         text = _hist_pat.sub(lambda m: f'<{m.group(1)}>[...]</{m.group(1)}>', text)
@@ -705,6 +705,7 @@ class NativeClaudeSession(BaseSession):
         try:
             while True: yield next(gen)
         except StopIteration as e: content_blocks = e.value or []
+        if content_blocks and (_injected := _ensure_text_block(content_blocks)): yield _injected
         if content_blocks and not (len(content_blocks) == 1 and content_blocks[0].get("text", "").startswith("!!!Error:")):
             self.history.append({"role": "assistant", "content": content_blocks})
         text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
@@ -876,6 +877,16 @@ def _parse_text_tool_calls(content):
     if tcs: content = re.sub(_xp, "", content, flags=re.DOTALL).strip()
     return tcs, content
 
+def _ensure_text_block(blocks):
+    """If response has thinking but no text block, inject a synthetic summary from thinking's first line."""
+    if any(b.get("type") == "text" for b in blocks): return None
+    th = next((b.get("thinking", "") for b in blocks if b.get("type") == "thinking"), "")
+    if not th: return None
+    line = th.strip().split('\n', 1)[0]
+    txt = "<summary>" + (line[:60] + '...' if len(line) > 60 else line) + "</summary>"
+    blocks.insert(1, {"type": "text", "text": txt})
+    return txt
+
 def _write_llm_log(label, content):
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp/model_responses')
     os.makedirs(log_dir, exist_ok=True)
@@ -981,6 +992,7 @@ class NativeToolClient:
         self.backend.system = combined
     def chat(self, messages, tools=None):
         if tools: self.backend.tools = tools
+        if not self.backend.history: self._pending_tool_ids = []
         combined_content = []; resp = None; tool_results = []
         for msg in messages:
             c = msg.get('content', '')
