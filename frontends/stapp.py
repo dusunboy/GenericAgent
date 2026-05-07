@@ -19,11 +19,27 @@ from continue_cmd import handle_frontend_command, reset_conversation, list_sessi
 
 st.set_page_config(page_title="Cowork", layout="wide")
 
+LANG = os.environ.get('GA_LANG', 'zh')
+if LANG not in ('zh', 'en'): LANG = 'zh'
+I18N = {
+    'zh': {
+        'force_stop': '强行停止任务',
+        'reinject_tools': '重新注入工具',
+        'desktop_pet': '🐱 桌面宠物',
+    },
+    'en': {
+        'force_stop': 'Force Stop',
+        'reinject_tools': 'Reinject Tools',
+        'desktop_pet': '🐱 Desktop Pet',
+    },
+}
+def T(key): return I18N.get(LANG, I18N['zh']).get(key, key)
+
 @st.cache_resource
 def init():
     agent = GeneraticAgent()
     if agent.llmclient is None:
-        st.error("⚠️ 未配置任何可用的 LLM 接口，请设置mykey.py。")
+        st.error("⚠️ Please set mykey.py!")
         st.stop()
     else: threading.Thread(target=agent.run, daemon=True).start()
     return agent
@@ -40,24 +56,21 @@ def render_sidebar():
     llm_options = agent.list_llms()
     current_idx = agent.llm_no
     llm_labels = {idx: f"{idx}: {(name or '').strip()}" for idx, name, _ in llm_options}
-    st.caption(f"LLM Core: {llm_labels.get(current_idx, str(current_idx))}", help="下拉切换备用链路")
-    selected_idx = st.selectbox("备用链路", [idx for idx, _, _ in llm_options], index=next((i for i, (idx, _, _) in enumerate(llm_options) if idx == current_idx), 0), format_func=llm_labels.get, label_visibility="collapsed", key="sidebar_llm_select")
+    st.caption(f"LLM Core: {llm_labels.get(current_idx, str(current_idx))}")
+    selected_idx = st.selectbox("LLM", [idx for idx, _, _ in llm_options], index=next((i for i, (idx, _, _) in enumerate(llm_options) if idx == current_idx), 0), format_func=llm_labels.get, label_visibility="collapsed", key="sidebar_llm_select")
     if selected_idx != current_idx:
         agent.next_llm(selected_idx); st.rerun(scope="fragment")
-    last_reply_time = st.session_state.get('last_reply_time', 0)
-    if last_reply_time > 0:
-        st.caption(f"空闲时间：{int(time.time()) - last_reply_time}秒", help="当超过30分钟未收到回复时，系统会自动任务")
-    if st.button("强行停止任务"):
-        agent.abort(); st.toast("已发送停止信号"); st.rerun()
-    if st.button("重新注入工具"):
+    if st.button(T('force_stop')):
+        agent.abort(); st.toast("Stop signal sended"); st.rerun()
+    if st.button(T('reinject_tools')):
         agent.llmclient.last_tools = ''
         try:
             hist_path = os.path.join(script_dir, '..', 'assets', 'tool_usable_history.json')
             with open(hist_path, 'r', encoding='utf-8') as f: tool_hist = json.load(f)
             agent.llmclient.backend.history.extend(tool_hist)
-            st.toast(f"已重新注入工具，追加了 {len(tool_hist)} 条示范记录")
-        except Exception as e: st.toast(f"注入工具示范失败: {e}")
-    if st.button("🐱 桌面宠物"):
+            st.toast(f"Tools injected")
+        except Exception as e: st.toast(f"Injected tools failed: {e}")
+    if st.button(T('desktop_pet')):
         kwargs = {'creationflags': 0x08} if sys.platform == 'win32' else {}
         pet_script = os.path.join(script_dir, 'desktop_pet_v2.pyw')
         if not os.path.exists(pet_script): pet_script = os.path.join(script_dir, 'desktop_pet.pyw')
@@ -72,26 +85,27 @@ def render_sidebar():
         def _pet_hook(ctx):
             parts = [f"Turn {ctx.get('turn','?')}"]
             if ctx.get('summary'): parts.append(ctx['summary'])
-            if ctx.get('exit_reason'): parts.append('任务已完成')
+            if ctx.get('exit_reason'): parts.append('DONE')
             _pet_req(f'msg={quote(chr(10).join(parts))}')
             if ctx.get('exit_reason'): _pet_req('state=idle')
         agent._turn_end_hooks['pet'] = _pet_hook
-        st.toast("桌面宠物已启动")
+        st.toast("Desktop pet started")
     
-    st.divider()
-    if st.button("开始空闲自主行动"):
-        st.session_state.last_reply_time = int(time.time()) - 1800
-        st.toast("已将上次回复时间设为1800秒前"); st.rerun()
-    if st.session_state.autonomous_enabled:
-        if st.button("⏸️ 禁止自主行动"):
-            st.session_state.autonomous_enabled = False
-            st.toast("⏸️ 已禁止自主行动"); st.rerun()
-        st.caption("🟢 自主行动运行中，会在你离开它30分钟后自动进行")
-    else:
-        if st.button("▶️ 允许自主行动", type="primary"):
-            st.session_state.autonomous_enabled = True
-            st.toast("✅ 已允许自主行动"); st.rerun()
-        st.caption("🔴 自主行动已停止")
+    if LANG == 'zh':
+        st.divider()
+        if st.button("开始空闲自主行动"):
+            st.session_state.last_reply_time = int(time.time()) - 1800
+            st.toast("已将上次回复时间设为1800秒前"); st.rerun()
+        if st.session_state.autonomous_enabled:
+            if st.button("⏸️ 禁止自主行动"):
+                st.session_state.autonomous_enabled = False
+                st.toast("⏸️ 已禁止自主行动"); st.rerun()
+            st.caption("🟢 自主行动运行中，会在你离开它30分钟后自动进行")
+        else:
+            if st.button("▶️ 允许自主行动", type="primary"):
+                st.session_state.autonomous_enabled = True
+                st.toast("✅ 已允许自主行动"); st.rerun()
+            st.caption("🔴 自主行动已停止")
 with st.sidebar: render_sidebar()
 
 def fold_turns(text):
@@ -239,6 +253,7 @@ if prompt := st.chat_input("any task?"):
             with live.container(): render_segments([segs[i]])
             if i < len(segs) - 1: live = st.empty()
     st.session_state.messages.append({"role": "assistant", "content": response})
+    st.session_state.messages = st.session_state.messages[-50:]
     st.session_state.last_reply_time = int(time.time())
 
 if st.session_state.autonomous_enabled:
