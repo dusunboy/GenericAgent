@@ -236,7 +236,7 @@ You're also welcome to join our **GenericAgent Community Group** for discussion,
 <div align="center">
   <table>
     <tr>
-      <td align="center"><strong>WeChat Group 14</strong><br><img src="assets/images/wechat_group14.jpg" alt="WeChat Group 14 QR Code" width="250"/></td>
+      <td align="center"><strong>WeChat Group 16</strong><br><img src="assets/images/wechat_group16.jpg" alt="WeChat Group 16 QR Code" width="250"/></td>
     </tr>
   </table>
 </div>
@@ -331,6 +331,7 @@ pip install requests textual               # 终端 UI (tuiapp.py)
 # 3. 配置 API Key
 cp mykey_template.py mykey.py
 # 编辑 mykey.py，填入你的 LLM API Key
+# 或使用交互式向导：python assets/configure_mykey.py
 
 # 4. 启动
 python launch.pyw
@@ -549,7 +550,7 @@ GenericAgent 通过**分层记忆 × 最小工具集 × 自主执行循环**完�
 <div align="center">
   <table>
     <tr>
-      <td align="center"><strong>微信群 14</strong><br><img src="assets/images/wechat_group14.jpg" alt="微信群 14 二维码" width="250"/></td>
+      <td align="center"><strong>微信群 16</strong><br><img src="assets/images/wechat_group16.jpg" alt="微信群 16 二维码" width="250"/></td>
     </tr>
   </table>
 </div>

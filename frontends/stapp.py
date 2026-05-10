@@ -16,6 +16,8 @@ import time, json, re, threading, queue
 from agentmain import GeneraticAgent
 import chatapp_common  # activate /continue command (monkey patches GeneraticAgent)
 from continue_cmd import handle_frontend_command, reset_conversation, list_sessions, extract_ui_messages
+from btw_cmd import handle_frontend_command as btw_handle_frontend
+from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
 
 st.set_page_config(page_title="Cowork", layout="wide")
 
@@ -139,6 +141,8 @@ def fold_turns(text):
             segments.append({'type': 'fold', 'title': title, 'content': content})
         else: segments.append({'type': 'text', 'content': marker + content})
     return segments
+_SUMMARY_TAG_RE = re.compile(r'<summary>.*?</summary>\s*', re.DOTALL)
+
 def render_segments(segments, suffix=''):
     # 整块重画：调用方用 slot.container() 包裹，保证 DOM 路径稳定、跨 rerun 对齐（消除"灰色重影"）。
     # heartbeat 空转时 segments 不变 → Streamlit 后端 diff 无变化 → 前端零闪烁；
@@ -147,22 +151,71 @@ def render_segments(segments, suffix=''):
         if seg['type'] == 'fold':
             with st.expander(seg['title'], expanded=False): st.markdown(seg['content'])
         else:
-            st.markdown(seg['content'] + suffix)
+            # Strip <summary> meta tags from text segments — folded turns already
+            # promote them to expander titles; for the first/last segments
+            # they'd otherwise leak into the chat as raw text (esp. after /continue
+            # restores a multi-turn body).
+            st.markdown(_SUMMARY_TAG_RE.sub('', seg['content']) + suffix)
 
-def agent_backend_stream(prompt):
-    display_queue = agent.put_task(prompt, source="user")
-    response = ''
+def agent_backend_stream(prompt=None):
+    """Drain main task display_queue.
+    - prompt given:  start a fresh task; new dq is kept in session_state.
+    - prompt is None: resume a dq left in session_state by a prior run (e.g. after /btw).
+    Per-chunk progress is mirrored to session_state.partial_response so the rendered
+    bubble survives reruns. No implicit agent.abort() — explicit stop is on the Stop button."""
+    if prompt is not None:
+        st.session_state.display_queue = agent.put_task(prompt, source="user")
+        st.session_state.partial_response = ''
+    dq = st.session_state.get('display_queue')
+    if dq is None: return
+    # Drop a dangling 'LLM Running (Turn N) ...' marker if the captured partial
+    # ended right at a turn boundary with no content yet — otherwise the resume
+    # bubble flashes as a marker-only gray line. The marker reappears with
+    # content on the next chunk (raw_resp is cumulative).
+    response = re.sub(r'\**LLM Running \(Turn \d+\) \.\.\.\**\s*$',
+                      '', st.session_state.get('partial_response', '')).rstrip()
     try:
         while True:
-            try: item = display_queue.get(timeout=1)
+            try: item = dq.get(timeout=1)
             except queue.Empty:
                 yield response   # heartbeat: let outer st.markdown() run → Streamlit checks StopException
                 continue
             if 'next' in item:
-                response = item['next']; yield response
+                response = item['next']
+                st.session_state.partial_response = response
+                yield response
             if 'done' in item:
+                st.session_state.display_queue = None
+                st.session_state.partial_response = ''
                 yield item['done']; break
-    finally: agent.abort()
+    finally:
+        agent.abort()
+        try:
+            st.session_state.display_queue = None
+            st.session_state.partial_response = ''
+        except BaseException:
+            pass
+
+
+def render_main_stream(prompt=None):
+    """Render the assistant bubble for the main task (new or resumed). Saves final to messages."""
+    with st.chat_message("assistant"):
+        frozen = 0; live = st.empty(); response = ''
+        CURSOR = ' ▌'
+        for response in agent_backend_stream(prompt):
+            segs = fold_turns(response)
+            n_done = max(0, len(segs) - 1)
+            while frozen < n_done:
+                with live.container(): render_segments([segs[frozen]])
+                live = st.empty(); frozen += 1
+            with live.container(): render_segments([segs[-1]], suffix=CURSOR)   # live 区域
+        segs = fold_turns(response)
+        for i in range(frozen, len(segs)):
+            with live.container(): render_segments([segs[i]])
+            if i < len(segs) - 1: live = st.empty()
+    if response:
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.last_reply_time = int(time.time())
 
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
@@ -234,26 +287,54 @@ if prompt := st.chat_input("any task?"):
             st.session_state.messages = list(st.session_state.messages) + \
                 [{"role": "user", "content": cmd, "time": ts}] + tail
         _reset_and_rerun()
+    if cmd.startswith("/btw"):
+        answer = btw_handle_frontend(agent, cmd)  # sync; bypasses put_task → main agent.run() untouched
+        st.session_state.messages = list(st.session_state.messages) + [
+            {"role": "user", "content": prompt, "time": ts},
+            {"role": "assistant", "content": answer, "time": ts},
+        ]
+        st.rerun()  # preserve display_queue/partial_response so resume path drains the running main task
+    if cmd.startswith("/export"):
+        parts = cmd.split(maxsplit=1)
+        sub = parts[1].strip() if len(parts) > 1 else ""
+        sub_lower = sub.lower()
+        if not sub:
+            result = (
+                "**选择导出方式：**\n\n"
+                "- `/export clip` — 整理到代码块中\n"
+                "- `/export <文件名>` — 导出到 `temp/<文件名>`（默认 .md 后缀）\n"
+                "- `/export all` — 显示完整对话日志路径"
+            )
+        elif sub_lower == "all":
+            log = agent.log_path
+            result = (f"📂 完整对话日志:\n\n`{log}`" if os.path.isfile(log)
+                      else f"❌ 当前会话尚无日志文件")
+        else:
+            text = last_assistant_text(agent)
+            if not text:
+                result = "❌ 还没有模型回复可导出"
+            elif sub_lower in ("clip", "copy"):
+                result = f"📋 最后一轮回复（点代码块右上角 📋 复制）:\n\n{wrap_for_clipboard(text)}"
+            else:
+                try:
+                    path = export_to_temp(text, sub)
+                    result = f"✅ 已导出:\n\n`{path}`"
+                except Exception as e:
+                    result = f"❌ 导出失败: {e}"
+        st.session_state.messages = list(st.session_state.messages) + [
+            {"role": "user", "content": cmd, "time": ts},
+            {"role": "assistant", "content": result, "time": ts},
+        ]
+        _reset_and_rerun()
+    # Regular prompt: any in-flight task will be aborted by the finally block in
+    # agent_backend_stream when StopException interrupts the prior generator.
     st.session_state.messages.append({"role": "user", "content": prompt})
     if hasattr(agent, '_pet_req') and not prompt.startswith('/'): agent._pet_req('state=walk')
     with st.chat_message("user"): st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        frozen = 0; live = st.empty(); response = ''
-        CURSOR = ' ▌'
-        for response in agent_backend_stream(prompt):
-            segs = fold_turns(response)
-            n_done = max(0, len(segs) - 1)
-            while frozen < n_done:
-                with live.container(): render_segments([segs[frozen]])
-                live = st.empty(); frozen += 1
-            with live.container(): render_segments([segs[-1]], suffix=CURSOR)   # live 区域
-        segs = fold_turns(response)
-        for i in range(frozen, len(segs)):
-            with live.container(): render_segments([segs[i]])
-            if i < len(segs) - 1: live = st.empty()
-    st.session_state.messages.append({"role": "assistant", "content": response})
-    st.session_state.last_reply_time = int(time.time())
+    render_main_stream(prompt)
+elif st.session_state.get('display_queue') is not None:
+    # No new prompt but a task is mid-flight (typically a /btw rerun) — resume drain.
+    render_main_stream()
 
 if st.session_state.autonomous_enabled:
     st.markdown(f"""<div id="last-reply-time" style="display:none">{st.session_state.get('last_reply_time', int(time.time()))}</div>""", unsafe_allow_html=True)

@@ -234,6 +234,7 @@ if __name__ == '__main__':
             try: task = mod.check()
             except Exception as e: 
                 print(f'[Reflect] check() error: {e}'); continue
+            if task and task == '/exit': break
             if task is None: continue
             print(f'[Reflect] triggered: {task[:80]}')
             dq = agent.put_task(task, source='reflect')
