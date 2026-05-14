@@ -118,3 +118,5 @@ reflect/*
 **/__pycache__/
 
 .claude/
+
+.codebuddy/
