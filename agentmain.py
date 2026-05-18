@@ -50,6 +50,8 @@ class GenericAgent:
         self.inc_out = False; self.verbose = True; self.show_mode = 'text'
         self.peer_hint = True
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
+        self._token_lock = threading.Lock()
+        self._session_tokens = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "requests": 0}
         self.load_llm_sessions()
 
     def load_llm_sessions(self):
@@ -130,6 +132,8 @@ class GenericAgent:
             if raw_query is None:
                 self.task_queue.task_done(); continue
             self.is_running = True
+            with self._token_lock:
+                self._session_tokens = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "requests": 0}
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             

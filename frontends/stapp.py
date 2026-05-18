@@ -14,12 +14,13 @@ sys.path.append(os.path.abspath(script_dir))
 import streamlit as st
 import time, json, re, threading, queue
 from agentmain import GeneraticAgent
+import llmcore
 import chatapp_common  # activate /continue command (monkey patches GeneraticAgent)
 from continue_cmd import handle_frontend_command, reset_conversation, list_sessions, extract_ui_messages
 from btw_cmd import handle_frontend_command as btw_handle_frontend
 from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
 
-st.set_page_config(page_title="Cowork", layout="wide")
+st.set_page_config(page_title="墨枢助手", layout="wide")
 
 LANG = os.environ.get('GA_LANG', 'zh')
 if LANG not in ('zh', 'en'): LANG = 'zh'
@@ -44,11 +45,45 @@ def init():
         st.error("⚠️ Please set mykey.py!")
         st.stop()
     else: threading.Thread(target=agent.run, daemon=True).start()
+    # 拦截 _record_usage，将 token 消耗写入 agent._session_tokens
+    _orig_record_usage = llmcore._record_usage
+    def _token_track_record(usage, api_mode):
+        if usage:
+            lock = getattr(agent, '_token_lock', None)
+            tokens = getattr(agent, '_session_tokens', None)
+            if lock and tokens is not None:
+                with lock:
+                    tokens['requests'] += 1
+                    if api_mode == 'messages':
+                        inp = int(usage.get('input_tokens', 0) or 0)
+                        cc = int(usage.get('cache_creation_input_tokens', 0) or 0)
+                        cr = int(usage.get('cache_read_input_tokens', 0) or 0)
+                        out = int(usage.get('output_tokens', 0) or 0)
+                        tokens['input'] += inp
+                        tokens['cache_create'] += cc
+                        tokens['cache_read'] += cr
+                        tokens['output'] += out
+                    elif api_mode == 'chat_completions':
+                        cached = int((usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0) or 0)
+                        inp = int(usage.get('prompt_tokens', 0) or 0) - cached
+                        out = int(usage.get('completion_tokens', 0) or 0)
+                        tokens['input'] += inp
+                        tokens['cache_read'] += cached
+                        tokens['output'] += out
+                    elif api_mode == 'responses':
+                        cached = int((usage.get('input_tokens_details') or {}).get('cached_tokens', 0) or 0)
+                        inp = int(usage.get('input_tokens', 0) or 0) - cached
+                        out = int(usage.get('output_tokens', 0) or 0)
+                        tokens['input'] += inp
+                        tokens['cache_read'] += cached
+                        tokens['output'] += out
+        return _orig_record_usage(usage, api_mode)
+    llmcore._record_usage = _token_track_record
     return agent
 
 agent = init()
 
-st.title("🖥️ Cowork")
+st.title("🖥️ 墨枢助手")
 
 st.session_state.setdefault('autonomous_enabled', False)
 
@@ -213,8 +248,30 @@ def render_main_stream(prompt=None):
         for i in range(frozen, len(segs)):
             with live.container(): render_segments([segs[i]])
             if i < len(segs) - 1: live = st.empty()
+        try:
+            tk = agent._session_tokens
+            inp = tk["input"] + tk["cache_create"] + tk["cache_read"]
+            out = tk["output"]
+            total = inp + out
+            parts = [time.strftime('%Y-%m-%d %H:%M:%S')]
+            if total: parts.append(f"总:{total}")
+            if inp: parts.append(f"输入:{inp}")
+            if out: parts.append(f"输出:{out}")
+            if tk["cache_create"]: parts.append(f"缓冲创建:{tk['cache_create']}")
+            if tk["cache_read"]: parts.append(f"缓冲读取:{tk['cache_read']}")
+            st.caption(' | '.join(parts))
+        except Exception:
+            st.caption(time.strftime('%Y-%m-%d %H:%M:%S'))
     if response:
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        try:
+            tk_display = tk  # from the try block above
+        except NameError:
+            tk_display = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
+        st.session_state.messages.append({
+            "role": "assistant", "content": response,
+            "time": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "tokens": tk_display.copy() if isinstance(tk_display, dict) else {},
+        })
         st.session_state.last_reply_time = int(time.time())
 
 if "messages" not in st.session_state: st.session_state.messages = []
@@ -225,6 +282,18 @@ for msg in st.session_state.messages:
         with slot.container():
             if msg["role"] == "assistant": render_segments(fold_turns(msg["content"]))
             else: st.markdown(msg["content"])
+        if msg.get("time"):
+            cap = msg["time"]
+            if msg.get("tokens"):
+                t = msg["tokens"]
+                inp = t.get("input", 0) + t.get("cache_create", 0) + t.get("cache_read", 0)
+                out = t.get("output", 0)
+                total = inp + out
+                tp = [f"总:{total}", f"输入:{inp}", f"输出:{out}"]
+                if t.get("cache_create"): tp.append(f"缓冲创建:{t['cache_create']}")
+                if t.get("cache_read"): tp.append(f"缓冲读取:{t['cache_read']}")
+                cap = ' | '.join([cap] + tp)
+            st.caption(cap)
 
 # Scroll-height ghost fix: during streaming, expander open/close mid-animation can leave
 # phantom height → scrollbar long but can't scroll to bottom. Periodically detect & reflow.
@@ -325,9 +394,11 @@ if prompt := st.chat_input("any task?"):
         _reset_and_rerun()
     # Regular prompt: any in-flight task will be aborted by the finally block in
     # agent_backend_stream when StopException interrupts the prior generator.
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.messages.append({"role": "user", "content": prompt, "time": ts})
     if hasattr(agent, '_pet_req') and not prompt.startswith('/'): agent._pet_req('state=walk')
-    with st.chat_message("user"): st.markdown(prompt)
+    with st.chat_message("user"):
+        st.markdown(prompt)
+        st.caption(ts)
     render_main_stream(prompt)
 elif st.session_state.get('display_queue') is not None:
     # No new prompt but a task is mid-flight (typically a /btw rerun) — resume drain.
