@@ -52,6 +52,7 @@ BUDGET_LIMIT_PROMPT = """[Goal Mode — 预算耗尽，收口]
 2. 列出未完成的事项和建议的 next step
 3. 确保工作文件夹中记录了关键成果
 4. 清理一些确定无用的中间临时文件和不再用的进程
+{done_prompt}
 """
 
 # --- 主逻辑 ---
@@ -75,7 +76,8 @@ def check():
         _save(state)
         return BUDGET_LIMIT_PROMPT.format(
             objective=state['objective'],
-            budget_min=budget_sec / 60
+            budget_min=budget_sec / 60,
+            done_prompt=state.get('done_prompt', '')
         )
     
     # 正常continuation
