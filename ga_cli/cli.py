@@ -50,13 +50,6 @@ COMMANDS = {
         "desc": "启动基于 PyQt5 的完整桌面聊天界面（气泡代码高亮、文件拖拽、历史搜索）",
         "cmd": ["python", "{FRONTENDS}/qtapp.py"],
     },
-    "web": {
-        "help": "启动Web增强版 (stapp2)  加 --native 使用 webview 桌面壳",
-        "desc": "启动 Streamlit Web 界面，浏览器访问，适合远程/跨设备",
-        "cmd": ["python", "-m", "streamlit", "run", "{FRONTENDS}/stapp2.py",
-                "--server.headless", "true"],
-        "flags": {"--native": {"help": "用 webview 原生窗口启动(stapp基础版)", "cmd": ["python", "{PROJECT_DIR}/launch.pyw"]}},
-    },
     "configure": {
         "help": "运行初始配置向导 (configure_mykey.py)",
         "desc": "首次安装后配置 API Key、模型参数等基础设置",
@@ -67,15 +60,15 @@ COMMANDS = {
         "desc": "启动 hub 前端管理面板（系统托盘 + 浏览器界面）",
         "cmd": ["python", "{PROJECT_DIR}/hub.pyw"],
     },
-    "pet": {
-        "help": "启动桌面宠物",
-        "desc": "启动桌面宠物皮肤系统，桌面上陪伴你的虚拟宠物",
-        "cmd": ["python", "{FRONTENDS}/desktop_pet_v2.pyw"],
-    },
     "tui": {
         "help": "启动终端 TUI (tuiapp)",
         "desc": "启动终端图形界面（Textual），适合纯终端环境或 SSH",
         "cmd": ["python", "{FRONTENDS}/tuiapp.py"],
+    },
+    "tui2": {
+        "help": "启动终端 TUI v2 (tuiapp_v2)",
+        "desc": "启动增强版终端图形界面（Textual v2），更多功能更好的体验",
+        "cmd": ["python", "{FRONTENDS}/tuiapp_v2.py"],
     },
     "cli": {
         "help": "启动 CLI 对话 (agentmain)",
@@ -163,6 +156,8 @@ def main():
               ga gui               启动桌面 GUI
               ga web               启动 Web 增强版
               ga web --native      启动 Web 基础版(桌面壳)
+              ga tui               启动终端 TUI (v1)
+              ga tui2              启动终端 TUI (v2 增强版)
               ga pet               启动桌面宠物 v2
               ga launch            启动 webview 桌面壳
               ga list              列出所有命令
