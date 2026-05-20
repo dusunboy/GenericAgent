@@ -127,6 +127,10 @@ reflect/*
 # Universal: never track __pycache__ anywhere
 **/__pycache__/
 
+chrome_tmwd/
+mywork/
+.codebuddy/
+
 .claude/
 
 .codebuddy/

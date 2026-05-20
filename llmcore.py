@@ -165,7 +165,9 @@ def _parse_claude_sse(resp_lines):
             stop_reason = delta.get("stop_reason", stop_reason)
             out_usage = evt.get("usage", {})
             out_tokens = out_usage.get("output_tokens", 0)
-            if out_tokens: print(f"[Output] tokens={out_tokens} stop_reason={stop_reason}")
+            if out_tokens:
+                _record_usage(out_usage, "messages")
+                print(f"[Output] tokens={out_tokens} stop_reason={stop_reason}")
         elif evt_type == "message_stop": got_message_stop = True
         elif evt_type == "error":
             err = evt.get("error", {})
@@ -293,21 +295,44 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
                 blocks.append({"type": "tool_use", "id": bid, "name": tc["name"], "input": inp})
         return blocks
 
+# --- Token usage registry (for accurate per-turn token statistics) ---
+_token_usage_list = []  # Each entry: dict with api_mode, input, output, thinking, cached
+def get_token_usage():
+    """Return and clear accumulated token usage data.
+    Returns: list of dicts {api_mode, input, output, thinking, cached}
+    """
+    global _token_usage_list
+    ret = list(_token_usage_list)
+    _token_usage_list = []
+    return ret
+def clear_token_usage():
+    global _token_usage_list; _token_usage_list = []
+# --- End token usage registry ---
+
 def _record_usage(usage, api_mode):
     if not usage: return
+    entry = {"api_mode": api_mode, "input": 0, "output": 0, "thinking": 0, "cached": 0}
     if api_mode == 'responses':
         cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-        inp = usage.get("input_tokens", 0); out = usage.get("output_tokens", 0)
-        print(f"[Cache] input={inp} cached={cached}")
-        if out: print(f"[Output] tokens={out}")
+inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        think = (usage.get("output_tokens_details") or {}).get("thinking_tokens", 0)
+        entry.update({"input": inp, "output": out, "thinking": think, "cached": cached})
+        print(f"[Cache] input={inp} output={out} thinking={think} cached={cached}")
     elif api_mode == 'chat_completions':
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        inp = usage.get("prompt_tokens", 0); out = usage.get("completion_tokens", 0)
-        print(f"[Cache] input={inp} cached={cached}")
-        if out: print(f"[Output] tokens={out}")
+        inp = usage.get("prompt_tokens", 0)
+        out = usage.get("completion_tokens", 0)
+        think = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+        entry.update({"input": inp, "output": out, "thinking": think, "cached": cached})
+        print(f"[Cache] input={inp} output={out} thinking={think} cached={cached}")
     elif api_mode == 'messages':
         ci, cr, inp = usage.get("cache_creation_input_tokens", 0), usage.get("cache_read_input_tokens", 0), usage.get("input_tokens", 0)
-        print(f"[Cache] input={inp} creation={ci} read={cr}")
+        out = usage.get("output_tokens", 0)
+        think = (usage.get("output_tokens_details") or {}).get("thinking_tokens", 0)
+        entry.update({"input": inp, "output": out, "thinking": think, "cached": ci + cr})
+        print(f"[Cache] input={inp} output={out} thinking={think} creation={ci} read={cr}")
+    _token_usage_list.append(entry)
     
 def _parse_openai_json(data, api_mode="chat_completions"):
     blocks = []
@@ -539,7 +564,7 @@ class BaseSession:
         mode = str(cfg.get('api_mode', 'chat_completions')).strip().lower().replace('-', '_')
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
-        self.max_tokens = cfg.get('max_tokens')
+        self.max_tokens = cfg.get('max_tokens', 8192)
     def _apply_claude_thinking(self, payload):
         if self.thinking_type:
             thinking = {"type": self.thinking_type}
@@ -572,6 +597,7 @@ class BaseSession:
         return _ask_gen() if self.stream else ''.join(list(_ask_gen()))
 
 def _keep_claude_block(b): return not isinstance(b, dict) or b.get("type") != "thinking" or b.get("signature")
+
 def _drop_unsigned_thinking(messages):
     for m in messages:
         c = m.get("content")
@@ -961,7 +987,7 @@ class MixinSession:
 
 THINKING_PROMPT_ZH = """
 ### 行动规范（持续有效）
-每次回复（含工具调用轮）都先在回复文字中包含一个<summary></summary> 中输出极简单行（<30字）物理快照：上次结果新信息+本次意图。此内容进入长期工作记忆。
+每次回复请先在回复文字中包含一个<summary></summary> 中输出极简单行（<30字）物理快照：上次结果新信息+本次意图。此内容进入长期工作记忆。
 \n**若用户需求未完成，必须进行工具调用！**
 """.strip()
 THINKING_PROMPT_EN = """
