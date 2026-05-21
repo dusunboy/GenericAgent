@@ -41,6 +41,7 @@ class TokenStats:
 # GA's real context budget lives on `BaseSession.context_win` (chars). The
 # trim trigger is `context_win * 3` (see llmcore.trim_messages_history), so
 # `/cost` compares actual-history chars against that cap for consistent units.
+# DeepSeek 1M ctx → context_win=500K chars → cap=1.5M chars.
 def context_window_chars(backend) -> int:
     """`context_win * 3` — the char cap before `trim_messages_history` kicks
     in. Reads dynamically so a `mykey.py` override propagates. Returns 0 on
@@ -148,12 +149,16 @@ def install() -> None:
                 elif api_mode == 'chat_completions':
                     cached = int((usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0) or 0)
                     inp = int(usage.get('prompt_tokens', 0) or 0) - cached
+                    out = int(usage.get('completion_tokens', 0) or 0)
                     t.input += inp; t.cache_read += cached
+                    t.output += out; t.last_output = out
                     t.last_input = inp + cached
                 elif api_mode == 'responses':
                     cached = int((usage.get('input_tokens_details') or {}).get('cached_tokens', 0) or 0)
                     inp = int(usage.get('input_tokens', 0) or 0) - cached
+                    out = int(usage.get('output_tokens', 0) or 0)
                     t.input += inp; t.cache_read += cached
+                    t.output += out; t.last_output = out
                     t.last_input = inp + cached
         except Exception: pass
         return orig_record(usage, api_mode)

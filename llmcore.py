@@ -314,7 +314,7 @@ def _record_usage(usage, api_mode):
     entry = {"api_mode": api_mode, "input": 0, "output": 0, "thinking": 0, "cached": 0}
     if api_mode == 'responses':
         cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-inp = usage.get("input_tokens", 0)
+        inp = usage.get("input_tokens", 0)
         out = usage.get("output_tokens", 0)
         think = (usage.get("output_tokens_details") or {}).get("thinking_tokens", 0)
         entry.update({"input": inp, "output": out, "thinking": think, "cached": cached})
@@ -540,9 +540,9 @@ class BaseSession:
         self.api_key = cfg['apikey']
         self.api_base = cfg['apibase'].rstrip('/')
         self.model = cfg.get('model', '')
-        default_context_win = 30000
+        default_context_win = 50000
         if 'deepseek' in self.model.lower():
-            default_context_win = 70000; self.cut_msg_interval = 25; self.trim_keep_rate = 0.3
+            self.cut_msg_interval = 25; self.trim_keep_rate = 0.3
         self.context_win = cfg.get('context_win', default_context_win)
         self.history = []; self.lock = threading.Lock(); self.system = ""
         self.name = cfg.get('name', self.model)
