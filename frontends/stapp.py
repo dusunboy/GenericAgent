@@ -12,7 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(script_dir, '..')))
 sys.path.append(os.path.abspath(script_dir))
 
 import streamlit as st
-import time, json, re, threading, queue, html
+import time, json, re, threading, queue
 from agentmain import GeneraticAgent
 import llmcore
 import chatapp_common  # activate /continue command (monkey patches GeneraticAgent)
@@ -44,10 +44,41 @@ def init():
     if agent.llmclient is None:
         st.error("⚠️ Please set mykey.py!")
         st.stop()
-    else:
-        threading.Thread(target=agent.run, daemon=True, name="ga-stapp-agent").start()
-    import cost_tracker
-    cost_tracker.install()
+    else: threading.Thread(target=agent.run, daemon=True, name="ga-stapp-agent").start()
+    # 拦截 _record_usage，将 token 消耗写入 agent._session_tokens
+    _orig_record_usage = llmcore._record_usage
+    def _token_track_record(usage, api_mode):
+        if usage:
+            lock = getattr(agent, '_token_lock', None)
+            tokens = getattr(agent, '_session_tokens', None)
+            if lock and tokens is not None:
+                with lock:
+                    tokens['requests'] += 1
+                    if api_mode == 'messages':
+                        inp = usage.get('input_tokens', 0) or 0
+                        out = usage.get('output_tokens', 0) or 0
+                        cc = usage.get('cache_creation_input_tokens', 0) or 0
+                        cr = usage.get('cache_read_input_tokens', 0) or 0
+                        tokens['input'] += inp
+                        tokens['output'] += out
+                        tokens['cache_create'] += cc
+                        tokens['cache_read'] += cr
+                    elif api_mode == 'chat_completions':
+                        inp = usage.get('prompt_tokens', 0) or 0
+                        out = usage.get('completion_tokens', 0) or 0
+                        cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0) or 0
+                        tokens['input'] += inp
+                        tokens['output'] += out
+                        tokens['cache_read'] += cached
+                    elif api_mode == 'responses':
+                        inp = usage.get('input_tokens', 0) or 0
+                        out = usage.get('output_tokens', 0) or 0
+                        cached = (usage.get('input_tokens_details') or {}).get('cached_tokens', 0) or 0
+                        tokens['input'] += inp
+                        tokens['output'] += out
+                        tokens['cache_read'] += cached
+        return _orig_record_usage(usage, api_mode)
+    llmcore._record_usage = _token_track_record
     agent._started_at = time.time()
     return agent
 
@@ -199,38 +230,8 @@ def agent_backend_stream(prompt=None):
             pass
 
 
-def _fmt_tk(n: int) -> str:
-    """Human-readable token count (e.g. 1.2K, 3.4M)."""
-    n = int(n)
-    if n < 1000: return f"{n}"
-    if n < 1_000_000:
-        v = n / 1000.0
-        return f"{v:.1f}K" if v < 100 else f"{int(v)}K"
-    v = n / 1_000_000.0
-    return f"{v:.2f}M" if v < 100 else f"{int(v)}M"
-
-def _elapsed_str(secs: float) -> str:
-    s = int(secs)
-    if s < 60: return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60: return f"{m}m {s}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m}m"
-
-def _cost_section(t) -> list[str]:
-    """Generate detailed token cost lines (same format as /cost)."""
-    import cost_tracker
-    lines = []
-    lines.append(f"  总 Tokens:      {_fmt_tk(t.total_tokens())}")
-    lines.append(f"  输入侧:          {_fmt_tk(t.total_input_side())}  (输入 {_fmt_tk(t.input)} \xb7 缓存创建 {_fmt_tk(t.cache_create)} \xb7 缓存读取 {_fmt_tk(t.cache_read)})")
-    lines.append(f"  输出:            {_fmt_tk(t.output)}")
-    if t.cache_read or t.cache_create:
-        lines.append(f"  缓存命中率:     {t.cache_hit_rate():.1f}%")
-    return lines
-
 def render_main_stream(prompt=None):
     """Render the assistant bubble for the main task (new or resumed). Saves final to messages."""
-    import cost_tracker as _ct
     with st.chat_message("assistant"):
         frozen = 0; live = st.empty(); response = ''
         CURSOR = ' ▌'
@@ -241,66 +242,37 @@ def render_main_stream(prompt=None):
                 with live.container(): render_segments([segs[frozen]])
                 live = st.empty(); frozen += 1
             with live.container(): render_segments([segs[-1]], suffix=CURSOR)
-            # 实时 token 显示 → 更新到底部 token 栏
-            try:
-                t = _ct.get("ga-stapp-agent")
-                inp_s = t.total_input_side()
-                st.session_state.live_token = {
-                    'type': 'streaming',
-                    'text': f"\u27f3 \u2191 {_fmt_tk(inp_s)} \xb7 \u2193 {_fmt_tk(t.output)}"
-                }
-            except Exception:
-                pass
         segs = fold_turns(response)
         for i in range(frozen, len(segs)):
             with live.container(): render_segments([segs[i]])
             if i < len(segs) - 1: live = st.empty()
-        # 增强统计 → 更新到底部 token 栏
         try:
-            t = _ct.get("ga-stapp-agent")
-            total = t.total_tokens()
-            inp_side = t.total_input_side()
-            out = t.output
-            parts = []
-            if total:
-                parts.append(f"\u603b\u8ba1:{_fmt_tk(total)}")
-                parts.append(f"\u2191{_fmt_tk(inp_side)} \u2193{_fmt_tk(out)}")
-            if t.cache_read or t.cache_create:
-                if t.cache_create:
-                    parts.append(f"\u7f13\u5b58:{_fmt_tk(t.cache_read)}\u8bfb/{_fmt_tk(t.cache_create)}\u521b")
-                else:
-                    parts.append(f"\u7f13\u5b58:{_fmt_tk(t.cache_read)}\u8bfb")
-                parts.append(f"{t.cache_hit_rate():.0f}%\u547d\u4e2d")
-            # 上下文占比
-            try:
-                backend = agent.llmclient.backend
-                cap = _ct.context_window_chars(backend)
-                used = _ct.current_input_chars(backend)
-                if cap > 0:
-                    pct = min(100.0, used / cap * 100.0)
-                    parts.append(f"\u4e0a\u4e0b\u6587:{pct:.0f}%\u5df2\u7528 ({_fmt_tk(used)} / {_fmt_tk(cap)})")
-            except Exception:
-                pass
-            parts.append(f"\u8bf7\u6c42:{t.requests}")
-            st.session_state.live_token = {
-                'type': 'final',
-                'text': ' | '.join(parts)
-            }
-            tk_display = {"input": t.input, "output": t.output,
-                          "cache_create": t.cache_create, "cache_read": t.cache_read,
-                          "requests": t.requests, "hit_rate": t.cache_hit_rate()}
+            lock = getattr(agent, '_token_lock', None)
+            tokens = getattr(agent, '_session_tokens', None)
+            if lock and tokens is not None:
+                with lock:
+                    tk_display = dict(tokens)
+            else:
+                tk_display = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "requests": 0}
         except Exception:
-            st.session_state.live_token = {'type': 'cleared'}
             tk_display = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "requests": 0}
+        # Show time and token info at end of streaming (history loop won't catch this round)
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        inp = tk_display.get("input", 0)
+        out = tk_display.get("output", 0)
+        total = inp + out
+        tp = [f"总:{total}", f"输入:{inp}", f"输出:{out}"]
+        if tk_display.get("cache_create"): tp.append(f"缓存创建:{tk_display['cache_create']}")
+        if tk_display.get("cache_read"): tp.append(f"缓存读取:{tk_display['cache_read']}")
+        cap = ' | '.join([ts] + tp)
+        st.caption(cap)
     if response:
         st.session_state.messages.append({
             "role": "assistant", "content": response,
             "time": time.strftime('%Y-%m-%d %H:%M:%S'),
-            "tokens": tk_display,
+            "tokens": tk_display.copy() if isinstance(tk_display, dict) else {},
         })
         st.session_state.last_reply_time = int(time.time())
-    # 任务结束后触发 rerun，让底部 token 栏代码获取到 live_token
-    st.rerun()
 
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
@@ -311,7 +283,17 @@ for msg in st.session_state.messages:
             if msg["role"] == "assistant": render_segments(fold_turns(msg["content"]))
             else: st.markdown(msg["content"])
         if msg.get("time"):
-            st.caption(msg["time"])
+            cap = msg["time"]
+            if msg.get("tokens"):
+                t = msg["tokens"]
+                inp = t.get("input", 0)
+                out = t.get("output", 0)
+                total = inp + out
+                tp = [f"总:{total}", f"输入:{inp}", f"输出:{out}"]
+                if t.get("cache_create"): tp.append(f"缓冲创建:{t['cache_create']}")
+                if t.get("cache_read"): tp.append(f"缓冲读取:{t['cache_read']}")
+                cap = ' | '.join([cap] + tp)
+            st.caption(cap)
 
 # Scroll-height ghost fix: during streaming, expander open/close mid-animation can leave
 # phantom height → scrollbar long but can't scroll to bottom. Periodically detect & reflow.
@@ -346,30 +328,6 @@ _js_ime_fix = ("" if os.name == 'nt' else
     "(e.stopImmediatePropagation(),e.preventDefault())},!0))})}"
     "f();new MutationObserver(f).observe(d.body,{childList:1,subtree:1})}()")
 _embed_html(f'<script>{_js_scroll_fix};{_js_ime_fix}</script>', height=0)
-
-# ─── Token 显示栏（CSS ::after 插入到聊天输入框容器底部） ──────────
-live_token = st.session_state.get('live_token')
-token_text = ''
-if live_token:
-    if live_token.get('type') == 'final':
-        token_text = f"📊 {live_token['text']}"
-    elif live_token.get('type') == 'streaming':
-        token_text = live_token['text']
-    elif live_token.get('type') == 'cleared':
-        st.session_state.live_token = None
-
-if token_text:
-    css_txt = token_text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\A ')
-    st.markdown(
-        f'<style>'
-        f'[data-testid="stChatInput"]::after{{'
-        f'content:"{css_txt}";'
-        f'display:block;font-size:0.75em;color:#888;text-align:right;'
-        f'padding:1px 16px 3px;'
-        f'border-top:1px solid rgba(128,128,128,0.12);'
-        f'}}</style>',
-        unsafe_allow_html=True
-    )
 
 if prompt := st.chat_input("any task?"):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -435,45 +393,6 @@ if prompt := st.chat_input("any task?"):
         st.session_state.messages = list(st.session_state.messages) + [
             {"role": "user", "content": cmd, "time": ts},
             {"role": "assistant", "content": result, "time": ts},
-        ]
-        _reset_and_rerun()
-    if cmd == "/cost" or (cmd == "/cost all"):
-        import cost_tracker as _ct
-        t = _ct.get("ga-stapp-agent")
-        try: backend = agent.llmclient.backend
-        except: backend = None
-        lines = ["✦ Token 用量"]
-        lines.append(f"  总 Tokens:      {_fmt_tk(t.total_tokens())}")
-        lines.append(f"  输入侧:          {_fmt_tk(t.total_input_side())}  (输入 {_fmt_tk(t.input)} \xb7 缓存创建 {_fmt_tk(t.cache_create)} \xb7 缓存读取 {_fmt_tk(t.cache_read)})")
-        lines.append(f"  输出:            {_fmt_tk(t.output)}")
-        if t.cache_read or t.cache_create:
-            lines.append(f"  缓存命中率:     {t.cache_hit_rate():.1f}%")
-        cap = _ct.context_window_chars(backend) if backend else 0
-        used = _ct.current_input_chars(backend) if backend else 0
-        if cap > 0:
-            pct = min(100.0, used / cap * 100.0)
-            lines.append(f"  上下文窗口:     {pct:.0f}% 已用 ({_fmt_tk(used)} / {_fmt_tk(cap)} 字符)")
-        lines.append(f"  请求次数:       {t.requests}")
-        lines.append(f"  运行时长:       {_elapsed_str(t.elapsed_seconds())}")
-        # 子进程追踪：扫描 temp/*/stdout.log
-        sub = _ct.scan_subagent_logs(since=getattr(agent, "_started_at", 0.0))
-        if sub and sub.total_tokens():
-            lines.append("")
-            lines.append(f"  子进程 (扫描 temp/*/stdout.log)")
-            lines.append(f"    总 Tokens:    {_fmt_tk(sub.total_tokens())}")
-            lines.append(f"    输入侧:       {_fmt_tk(sub.total_input_side())} \xb7 输出: {_fmt_tk(sub.output)}")
-            lines.append(f"    请求次数:     {sub.requests}")
-        # 多会话汇总：显示所有已注册的线程追踪器
-        all_t = _ct.all_trackers()
-        if len(all_t) > 1:
-            lines.append("")
-            lines.append(f"  多会话汇总 ({len(all_t)} 个线程):")
-            for name, tt in all_t.items():
-                if name == "ga-stapp-agent": continue
-                lines.append(f"    [{name}] {_fmt_tk(tt.total_tokens())} 总 / {_fmt_tk(tt.total_input_side())}↑ {_fmt_tk(tt.output)}↓")
-        st.session_state.messages = list(st.session_state.messages) + [
-            {"role": "user", "content": cmd, "time": ts},
-            {"role": "assistant", "content": '\n'.join(lines), "time": ts},
         ]
         _reset_and_rerun()
     # Regular prompt: any in-flight task will be aborted by the finally block in
