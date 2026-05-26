@@ -87,10 +87,37 @@ agent = init()
 st.title("🖥️ 墨枢助手")
 
 st.session_state.setdefault('autonomous_enabled', False)
+st.session_state.setdefault('input_history', [])
+
+@st.dialog("📋 Memory Catalog", width="large")
+def show_catalog_dialog(catalog_path):
+    with open(catalog_path, 'r', encoding='utf-8') as f:
+        catalog_text = f.read()
+    search = st.text_input("🔍 搜索过滤", placeholder="输入关键词快速定位...", key="catalog_search")
+    if search:
+        lines = catalog_text.split('\n')
+        header = lines[0] + '\n' + lines[1] if len(lines) > 2 else '\n'.join(lines[:2])
+        matched = [l for l in lines[2:] if search.lower() in l.lower()]
+        filtered = header + '\n' + '\n'.join(matched) if matched else header + '\n*(无匹配结果)*'
+        st.caption(f"匹配 {len(matched)} 行")
+        st.code(filtered, language=None, line_numbers=False)
+    else:
+        st.code(catalog_text, language=None, line_numbers=False)
+    if st.button("关闭", use_container_width=True):
+        st.session_state.show_catalog = False
+        st.rerun()
 
 @st.fragment
 def render_sidebar():
     st.session_state.setdefault('autonomous_enabled', False)
+    # --- Memory Catalog ---
+    catalog_path = os.path.abspath(os.path.join(script_dir, '..', 'memory', 'memory_catalog.md'))
+    if os.path.exists(catalog_path):
+        if st.button("📋 Memory Catalog", use_container_width=True):
+            st.session_state.show_catalog = True
+    if st.session_state.get('show_catalog'):
+        show_catalog_dialog(catalog_path)
+    # --- LLM ---
     llm_options = agent.list_llms()
     current_idx = agent.llm_no
     llm_labels = {idx: f"{idx}: {(name or '').strip()}" for idx, name, _ in llm_options}
@@ -98,6 +125,19 @@ def render_sidebar():
     selected_idx = st.selectbox("LLM", [idx for idx, _, _ in llm_options], index=next((i for i, (idx, _, _) in enumerate(llm_options) if idx == current_idx), 0), format_func=llm_labels.get, label_visibility="collapsed", key="sidebar_llm_select")
     if selected_idx != current_idx:
         agent.next_llm(selected_idx); st.rerun(scope="fragment")
+    # --- Input History Recall (sidebar) ---
+    history = st.session_state.get('input_history', [])
+    if history:
+        st.divider()
+        idx = st.selectbox("📜 历史输入", range(len(history)), format_func=lambda i: (history[i][:60] + "...") if len(history[i]) > 60 else history[i], key="hist_select")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.caption(history[idx][:120])
+        with c2:
+            if st.button("📤 发送", use_container_width=True, key="hist_send"):
+                st.session_state._pending_prompt = history[idx]
+                st.rerun()
+
     if st.button(T('force_stop')):
         agent.abort(); st.toast("Stop signal sended"); st.rerun()
     if st.button(T('reinject_tools')):
@@ -333,7 +373,13 @@ _js_ime_fix = ("" if os.name == 'nt' else
 _embed_html(f'<script>{_js_scroll_fix};{_js_ime_fix}</script>', height=0)
 
 _injected = st.session_state.pop('_inject_prompt', None)
-prompt = st.chat_input("any task?") or _injected
+# Handle pending prompt from sidebar history recall
+if st.session_state.get('_pending_prompt'):
+    prompt = st.session_state._pending_prompt
+    st.session_state._pending_prompt = None
+else:
+    prompt = st.chat_input("any task?") or _injected
+
 if prompt:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     cmd = (prompt or "").strip()
@@ -403,6 +449,15 @@ if prompt:
     # Regular prompt: any in-flight task will be aborted by the finally block in
     # agent_backend_stream when StopException interrupts the prior generator.
     st.session_state.messages.append({"role": "user", "content": prompt, "time": ts})
+    # Save to input history (max 20, dedup, latest first)
+    history = st.session_state.get('input_history', [])
+    stripped = (prompt or "").strip()
+    if stripped and stripped in history:
+        history.remove(stripped)
+    if stripped:
+        history.insert(0, stripped)
+    st.session_state.input_history = history[:20]
+    st.session_state._needs_history_rerun = True
     if hasattr(agent, '_pet_req') and not prompt.startswith('/'): agent._pet_req('state=walk')
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -414,3 +469,8 @@ elif st.session_state.get('display_queue') is not None:
 
 if st.session_state.autonomous_enabled:
     st.markdown(f"""<div id="last-reply-time" style="display:none">{st.session_state.get('last_reply_time', int(time.time()))}</div>""", unsafe_allow_html=True)
+
+# Post-streaming rerun to sync sidebar history
+if st.session_state.get('_needs_history_rerun'):
+    st.session_state._needs_history_rerun = False
+    st.rerun()
