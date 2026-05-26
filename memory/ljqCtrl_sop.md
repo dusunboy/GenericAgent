@@ -8,6 +8,7 @@
 - `ljqCtrl.Click(x, y=None)`: 模拟点击。支持 `Click((x, y))` 或 `Click(x, y)`
 - `ljqCtrl.Press(cmd, staytime=0)`: 模拟按键。如 `Press('ctrl+c')`
 - `ljqCtrl.FindBlock(fn, wrect=None, threshold=0.8)`: 找图。返回 `((center_x, center_y), is_found)`
+- `ljqCtrl.GrabWindowBg(hwnd_or_name, timeout=5)`: WGC后台截图(Win10+, pip install windows-capture), 传hwnd(int)或窗口标题子串(str), 返回PIL Image
 - `ljqCtrl.MouseDClick(staytime=0.05)`: 鼠标双击
 
 ## 1. 环境载入

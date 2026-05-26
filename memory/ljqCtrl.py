@@ -7,7 +7,8 @@ ljqCtrl Quick Reference:
 - Press(cmd, staytime=0): Keyboard shortcuts (e.g. 'ctrl+v')
 - FindBlock(fn, wrect=None, threshold=0.8) -> (obj_center_phys, is_found)
 - MouseDClick(staytime=0.05), MouseClick(staytime=0.05)
-- GrabWindow(hwnd) -> PIL Image: DPI-safe window screenshot
+- GrabWindow(hwnd) -> PIL Image: DPI-safe window screenshot (needs foreground)
+- GrabWindowBg(hwnd_or_name) -> PIL Image: WGC background capture (Win10+, pip install windows-capture)
 """
 
 import os, sys, time, random, math, win32api, win32con, ctypes
@@ -70,6 +71,25 @@ def GrabWindow(hwnd):
 	import win32gui; win32gui.SetForegroundWindow(hwnd); time.sleep(0.3)
 	bbox = tuple(int(v / dpi_scale) for v in win32gui.GetWindowRect(hwnd))
 	return ImageGrab.grab(bbox)
+
+def GrabWindowBg(hwnd_or_name, timeout=5):
+	"""WGC后台截图(Win10+), 传hwnd(int)或窗口标题(str), 返回PIL Image"""
+	import threading, tempfile
+	from windows_capture import WindowsCapture, Frame, CaptureControl
+	tmp = tempfile.mktemp(suffix='.png')
+	done = threading.Event()
+	kw = {'window_hwnd': hwnd_or_name} if isinstance(hwnd_or_name, int) else {'window_name': hwnd_or_name}
+	cap = WindowsCapture(cursor_capture=False, draw_border=False, **kw)
+	@cap.event
+	def on_frame_arrived(frame: Frame, capture_control: CaptureControl):
+		frame.save_as_image(tmp)
+		capture_control.stop(); done.set()
+	@cap.event
+	def on_closed(): done.set()
+	cap.start_free_threaded()
+	done.wait(timeout=timeout)
+	if os.path.exists(tmp):
+		img = Image.open(tmp); img.load(); os.remove(tmp); return img
 
 def imshow(mt, sec=0):
 	cv2.imshow('cc', mt)
