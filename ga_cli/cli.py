@@ -75,6 +75,11 @@ COMMANDS = {
         "desc": "启动命令行交互对话模式，最轻量的使用方式",
         "cmd": ["python", "{PROJECT_DIR}/agentmain.py"],
     },
+    "task": {
+        "help": "启动反射调度任务 (reflect/scheduler)",
+        "desc": "启动反射调度器，运行 reflect/scheduler.py 中的调度任务",
+        "cmd": ["python", "{PROJECT_DIR}/agentmain.py", "--reflect", "{REFLECT}/scheduler.py"],
+    },
     "launch": {
         "help": "启动 webview 桌面壳 (launch.pyw)",
         "desc": "以原生窗口形式包装 stapp Web 界面（基于 pywebview）",
@@ -159,6 +164,7 @@ def main():
               ga tui               启动终端 TUI (v1)
               ga tui2              启动终端 TUI (v2 增强版)
               ga pet               启动桌面宠物 v2
+              ga task              启动反射调度任务
               ga launch            启动 webview 桌面壳
               ga list              列出所有命令
         """),
