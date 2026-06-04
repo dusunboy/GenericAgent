@@ -53,7 +53,8 @@ class GenericAgent:
         self.inc_out = False; self.verbose = True; self.show_mode = 'text'
         self.peer_hint = True
         self.force_non_stream = False
-        self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
+        logid = f'{(time.time_ns() + random.randrange(1_000_000)) % 1_000_000:06d}'
+        self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{logid}.txt')
         self._token_lock = threading.Lock()
         self._session_tokens = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "requests": 0}
         self.load_llm_sessions()
@@ -131,6 +132,7 @@ class GenericAgent:
     def run(self):
         while True:
             task = self.task_queue.get()
+            if isinstance(task, str): break
             raw_query, source, display_queue = task["query"], task["source"], task["output"]
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
@@ -148,6 +150,7 @@ class GenericAgent:
             sys_prompt = get_system_prompt() + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
+            if getattr(self, 'no_print', False): handler.print = lambda *a, **k: None
             if self.handler and 'key_info' in self.handler.working: 
                 ki = re.sub(r'\n\[SYSTEM\] 此为.*?工作记忆[。\n]*', '', self.handler.working['key_info'])  # 去旧
                 handler.working['key_info'] = ki
@@ -172,8 +175,9 @@ class GenericAgent:
                         display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 
                                            'source': source, 'turn': curr_turn, 'outputs': turn_resps[-2:]})
                         last_pos = len(full_resp)
-                if self.inc_out and last_pos < len(full_resp): display_queue.put({'next': full_resp[last_pos:], 'source': source, 
-                                                                                  'turn': curr_turn, 'outputs': turn_resps[-2:]})
+                if self.inc_out and last_pos < len(full_resp):
+                    display_queue.put({'next': full_resp[last_pos:], 'source': source,
+                                    'turn': curr_turn, 'outputs': turn_resps[-2:]})
                 #if '</summary>' in full_resp: full_resp = full_resp.replace('</summary>', '</summary>\n\n')
                 #if '</file_content>' in full_resp: full_resp = re.sub(r'<file_content>\s*(.*?)\s*</file_content>', r'\n````\n<file_content>\n\1\n</file_content>\n````', full_resp, flags=re.DOTALL)                
                 display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
