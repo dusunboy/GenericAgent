@@ -17,7 +17,9 @@ def _load_mykeys():
         raise Exception(f'[ERROR] mykey.py has syntax error: {e}') from e
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mykey.json')
     if not os.path.exists(p): raise Exception('[ERROR] mykey.py not found in sys.path and mykey.json not found. Run "python configure_mykey.py" or copy mykey_template.py to mykey.py and fill in your keys.')
-    with open(_mykey_path := p, encoding='utf-8') as f: return json.load(f)
+    with open(_mykey_path := p, encoding='utf-8') as f: mk = json.load(f)
+    if isinstance(mk, dict) and 'remote_url' in mk: return requests.get(mk['remote_url'], timeout=10).json()
+    return mk
 
 _mykey_path = _mykey_mtime = None
 def reload_mykeys():
@@ -426,6 +428,7 @@ def _openai_stream(sess, messages):
     if 'kimi' in ml or 'moonshot' in ml: temperature = 1
     elif 'minimax' in ml: temperature = max(0.01, min(temperature, 1.0))  # MiniMax requires temp in (0, 1]
     headers = {"Authorization": f"Bearer {sess.api_key}", "Content-Type": "application/json", "Accept": "text/event-stream"}
+    headers["User-Agent"] = sess.user_agent
     if api_mode == "responses":
         url = auto_make_url(sess.api_base, "responses")
         payload = {"model": model, "input": _to_responses_input(messages), "stream": sess.stream, 
@@ -570,6 +573,8 @@ class BaseSession:
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
         self.max_tokens = cfg.get('max_tokens', 8192)
+        self.default_ua = "claude-cli/2.1.152 (external, cli)"
+        self.user_agent = cfg.get("user_agent", self.default_ua)
     def _apply_claude_thinking(self, payload):
         if self.thinking_type:
             thinking = {"type": self.thinking_type}
@@ -683,11 +688,11 @@ class NativeClaudeSession(BaseSession):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.fake_cc_system_prompt = cfg.get("fake_cc_system_prompt", False)
-        self.user_agent = cfg.get("user_agent", "claude-cli/2.1.152 (external, cli)")
         self._session_id = str(uuid.uuid4())
         self._account_uuid = str(uuid.uuid4())
         self._device_id = uuid.uuid4().hex + uuid.uuid4().hex[:32]
         self.tools = None
+        if self.user_agent == self.default_ua: self.user_agent = "claude-cli/2.1.152 (native, cli)"
     def raw_ask(self, messages):
         if self.max_tokens is None: self.max_tokens = 8192
         model = self.model
