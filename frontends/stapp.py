@@ -20,7 +20,7 @@ from continue_cmd import handle_frontend_command, reset_conversation, list_sessi
 from btw_cmd import handle_frontend_command as btw_handle_frontend
 from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
 
-st.set_page_config(page_title="墨枢助手", layout="wide")
+st.set_page_config(page_title="墨枢助手", layout="wide", initial_sidebar_state="collapsed")
 
 LANG = os.environ.get('GA_LANG', 'zh')
 if LANG not in ('zh', 'en'): LANG = 'zh'
