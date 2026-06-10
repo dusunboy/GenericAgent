@@ -1,4 +1,4 @@
-import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid
+import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid, pathlib
 from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
@@ -411,6 +411,7 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
                     if not e.value and not streamed: raise requests.ConnectionError("empty response")
                     return e.value or []
         except (requests.Timeout, requests.ConnectionError) as e:
+            #pathlib.Path(__file__).parent.joinpath('temp','bad_requests.json').write_text(json.dumps({"url":url,"headers":headers,"payload":payload,"err":str(e),"t":time.time()},ensure_ascii=False),encoding='utf-8')
             err = f"!!!Error: {type(e).__name__}"
             if attempt < sess.max_retries:
                 d = _delay(None, attempt)
@@ -559,7 +560,7 @@ class BaseSession:
         self.max_retries = max(0, int(cfg.get('max_retries', 4)))
         self.verify = cfg.get('verify', True)
         self.stream = cfg.get('stream', True)
-        default_ct, default_rt = (5, 30) if self.stream else (10, 240)
+        default_ct, default_rt = (5, 40) if self.stream else (10, 240)
         self.connect_timeout = max(1, int(cfg.get('timeout', default_ct)))
         self.read_timeout = max(5, int(cfg.get('read_timeout', default_rt)))
         def _enum(key, valid):
@@ -709,7 +710,7 @@ class NativeClaudeSession(BaseSession):
         if self.api_key.startswith("sk-ant-"): headers["x-api-key"] = self.api_key
         else: headers["authorization"] = f"Bearer {self.api_key}"
         payload = {"model": model, "messages": messages, "max_tokens": self.max_tokens, "stream": self.stream}
-        if self.fake_cc_system_prompt: payload["max_tokens"] = 64000
+        #if self.fake_cc_system_prompt: payload["max_tokens"] = 64000
         if self.temperature != 1: payload["temperature"] = self.temperature
         self._apply_claude_thinking(payload)
         payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}; 
