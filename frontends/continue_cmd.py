@@ -36,7 +36,7 @@ def _first_user(pairs):
         if not isinstance(msg, dict): continue
         for blk in msg.get('content', []) or []:
             if isinstance(blk, dict) and blk.get('type') == 'text':
-                t = (blk.get('text') or '').strip()
+                t = strip_project_mode(blk.get('text') or '').strip()
                 if t and '<history>' not in t and not t.startswith('### [WORKING MEMORY]'):
                     return t
     for p, _ in pairs[:1]:
@@ -440,6 +440,17 @@ def handle(agent, query, display_queue):
 _INJECT_MARKERS = ('### [WORKING MEMORY]', '[SYSTEM TIPS]', '[SYSTEM]', '[System]',
                    '[DANGER]', '### [总结提炼经验]')
 
+# project_mode 插件把 `\n\n---\n[PROJECT MODE: <name>]\n…\n---` 追加在用户消息末尾
+# (见 plugins/project_mode._build_injection)。它会进日志,所以 /continue 重建 UI 时
+# 必须从显示文本里剔除,只留用户原话。不能加进 _INJECT_MARKERS——那会把整块(连用户
+# 原话)一起丢弃;这里只剜掉注入这一段后缀。
+_PM_BLOCK_RE = re.compile(r"\n*-{3,}\n\[PROJECT MODE:.*?\n-{3,}\s*$", re.DOTALL)
+
+
+def strip_project_mode(text: str) -> str:
+    """剔除用户文本尾部的 project-mode 注入块。"""
+    return _PM_BLOCK_RE.sub("", text or "")
+
 
 def _user_text(prompt_body):
     """User-typed text from a prompt JSON; '' if this is an agent auto-continuation.
@@ -458,7 +469,7 @@ def _user_text(prompt_body):
         return ''
     for blk in blocks:
         if isinstance(blk, dict) and blk.get('type') == 'text':
-            t = (blk.get('text') or '').strip()
+            t = strip_project_mode(blk.get('text') or '').strip()
             if t and not any(mk in t for mk in _INJECT_MARKERS): return t
     return ''
 
@@ -543,6 +554,44 @@ def _format_response_segment(response_body, tool_results):
             tid = b.get('id') or ''
             if tid and tid in tool_results: tool_parts.append(tool_results[tid])
     return '\n\n'.join(p for p in ['\n\n'.join(texts), '\n'.join(tool_parts)] if p)
+
+
+_PLAN_ENTRY_RE = re.compile(r'enter_plan_mode\(\s*[\'"]([^\'"]+plan\.md)[\'"]')
+
+
+def find_plan_entry(path):
+    """Last `enter_plan_mode("…plan.md")` call in a model_responses log.
+
+    Plan mode has exactly one entry point (plan_sop.md): a `code_run` tool call
+    whose inline_eval script invokes `handler.enter_plan_mode(...)`. That call
+    survives in the log as a structured `tool_use` block — unlike a plan path
+    merely *mentioned* in chat text, it cannot be produced by the user typing
+    a filename. Scanning these blocks is therefore the restore criterion for
+    the plan card; the last match wins so re-entered plans track the newest.
+
+    Returns the plan.md path string as written in the script, or None.
+    """
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except Exception:
+        return None
+    last = None
+    for _prompt, response in _pairs(content):
+        try:
+            blocks = ast.literal_eval(response)
+        except Exception:
+            continue
+        if not isinstance(blocks, list):
+            continue
+        for b in blocks:
+            if not (isinstance(b, dict) and b.get('type') == 'tool_use'
+                    and b.get('name') == 'code_run'):
+                continue
+            m = _PLAN_ENTRY_RE.search(str((b.get('input') or {}).get('script') or ''))
+            if m:
+                last = m.group(1)
+    return last
 
 
 def iter_write_captures(path):
