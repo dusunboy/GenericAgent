@@ -62,6 +62,7 @@ class GenericAgent:
         self._token_lock = threading.Lock()
         self._session_tokens = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0, "requests": 0}
         self.load_llm_sessions()
+        self.extra_sys_prompts = []
 
     def load_llm_sessions(self):
         mykeys, changed = reload_mykeys()
@@ -150,8 +151,7 @@ class GenericAgent:
                 raw_query = f'Long user prompt saved to {task_file}. Read and execute.'
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
-            
-            sys_prompt = get_system_prompt() + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
+            sys_prompt = get_system_prompt() + '\n'.join(self.extra_sys_prompts) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
             if getattr(self, 'no_print', False): handler.print = lambda *a, **k: None
